@@ -134,8 +134,14 @@ type 'a parse_io = (('a, [ `Input ]) parse_av, ('a, [ `Output ]) parse_av) io
 val parse : [ `Attached ] parse_io -> string -> config -> unit
 
 (** Check validity and configure all the links and formats in the graph and
-    return its outputs and outputs. *)
-val launch : config -> t
+    return its outputs and outputs.
+
+    [hardware_device], when given, is attached as the [hw_device_ctx] of
+    every filter in the graph that declares [AVFILTER_FLAG_HWDEVICE]
+    (e.g. [hwupload], [hwmap], the [*_vaapi] filters). This is required
+    for [hwupload] to upload software frames to a hardware surface - the
+    bare libavfilter graph otherwise has no device to upload to. *)
+val launch : ?hardware_device:Avutil.HwContext.device_context -> config -> t
 
 module Utils : sig
   type audio_converter

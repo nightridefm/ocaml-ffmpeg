@@ -500,11 +500,37 @@ CAMLprim value ocaml_avfilter_buffersink_set_frame_size(value _src,
   CAMLreturn(Val_unit);
 }
 
-CAMLprim value ocaml_avfilter_config(value _graph) {
-  CAMLparam1(_graph);
+CAMLprim value ocaml_avfilter_config(value _graph, value _device) {
+  CAMLparam2(_graph, _device);
+  AVFilterGraph *graph = Filter_graph_val(_graph);
+  int err;
+
+  /* If a hardware device is supplied, attach it to every filter in the
+     graph that declares AVFILTER_FLAG_HWDEVICE (hwupload, hwmap, the
+     *_vaapi scale/encode filters, ...) before configuring. Without this,
+     libavfilter's hwupload fails config with "A hardware device
+     reference is required to upload frames to": nothing on a bare
+     libavfilter graph carries a device. The ffmpeg CLI sets this from
+     -filter_hw_device / -vaapi_device; this mirrors
+     ffmpeg.c:configure_filtergraph for the OCaml graph API. We only set
+     it where it isn't already present so derive_device / explicitly
+     mapped filters keep their own device. */
+  if (_device != Val_none) {
+    AVBufferRef *device = BufferRef_val(Some_val(_device));
+    unsigned int i;
+    for (i = 0; i < graph->nb_filters; i++) {
+      AVFilterContext *fctx = graph->filters[i];
+      if ((fctx->filter->flags & AVFILTER_FLAG_HWDEVICE) &&
+          !fctx->hw_device_ctx) {
+        fctx->hw_device_ctx = av_buffer_ref(device);
+        if (!fctx->hw_device_ctx)
+          caml_raise_out_of_memory();
+      }
+    }
+  }
 
   caml_release_runtime_system();
-  int err = avfilter_graph_config(Filter_graph_val(_graph), NULL);
+  err = avfilter_graph_config(graph, NULL);
   caml_acquire_runtime_system();
 
   if (err < 0)

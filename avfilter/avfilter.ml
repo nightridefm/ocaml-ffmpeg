@@ -341,7 +341,8 @@ let parse ({ inputs; outputs } : [ `Attached ] parse_io) filters graph =
   in
   parse ~inputs ~outputs filters graph.c
 
-external config : _config -> unit = "ocaml_avfilter_config"
+external config : _config -> Avutil.HwContext.device_context option -> unit
+  = "ocaml_avfilter_config"
 
 (* First argument is not used but here to make sure that _config is not GCed while
    using the filters. *)
@@ -360,8 +361,8 @@ let write_frame config filter = function
 external get_frame : _config -> filter_ctx -> 'b Avutil.frame
   = "ocaml_avfilter_get_frame"
 
-let launch graph =
-  config graph.c;
+let launch ?hardware_device graph =
+  config graph.c hardware_device;
   let audio =
     List.map
       (fun (name, filter_ctx) -> (name, write_frame graph.c filter_ctx))
