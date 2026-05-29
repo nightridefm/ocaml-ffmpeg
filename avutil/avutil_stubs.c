@@ -2104,6 +2104,19 @@ CAMLprim value ocaml_avutil_create_frame_context(value _width, value _height,
   frames_ctx->sw_format = PixelFormat_val(_src_pixel_format);
   frames_ctx->width = Int_val(_width);
   frames_ctx->height = Int_val(_height);
+  /* initial_pool_size MUST be > 0 for hardware encode pipelines.
+     Several VAAPI drivers (notably Mesa radeonsi on AMD) allocate
+     surfaces from a fixed pool sized at av_hwframe_ctx_init() time;
+     leaving this at the default 0 means av_hwframe_get_buffer() has no
+     pool to draw from and returns AVERROR(EINVAL) on the first frame -
+     the exact "Invalid argument" we hit feeding hevc_vaapi/h264_vaapi.
+     FFmpeg's own `hwupload` filter sets a non-zero default for the same
+     reason. 32 covers the encoder's reference + reorder + in-flight
+     depth with comfortable headroom; surfaces are ~3MB each at 1080p
+     NV12 so the pool is ~96MB, negligible next to the encode savings.
+     Decode-side frame contexts (which call this too) are unaffected -
+     a fixed pool is equally valid there. */
+  frames_ctx->initial_pool_size = 32;
 
   caml_release_runtime_system();
   ret = av_hwframe_ctx_init(hw_frames_ref);
