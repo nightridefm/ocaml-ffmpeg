@@ -1,4 +1,3 @@
-#include <stdlib.h>
 #include <string.h>
 
 #define CAML_NAME_SPACE 1
@@ -1842,21 +1841,36 @@ static void init_stream_encoder(AVBufferRef *device_ctx, AVBufferRef *frame_ctx,
      null *options so the caller's unused-key scan and av_dict_free
      no-op - the dict is now the stream's to free. */
   if (!frame_ctx && !device_ctx) {
-    /* enc_ctx->pix_fmt isn't set yet (pixel_format is applied from the
-       options dict at avcodec_open2), so read it from the dict. liquidsoap
-       stores it as the numeric AVPixelFormat (Pixel_format.get_id), so
-       parse an integer first and fall back to a format name. */
-    AVDictionaryEntry *pf = av_dict_get(*options, "pixel_format", NULL, 0);
-    enum AVPixelFormat pix_fmt = AV_PIX_FMT_NONE;
-    if (pf) {
-      char *end = NULL;
-      long n = strtol(pf->value, &end, 10);
-      pix_fmt = (end && *end == '\0') ? (enum AVPixelFormat)n
-                                      : av_get_pix_fmt(pf->value);
-    }
-    if (pix_fmt != AV_PIX_FMT_NONE) {
-      const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
-      if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+    /* Defer the open if this codec can encode ONLY hardware pixel formats
+       (e.g. hevc_vaapi / h264_vaapi, whose sole supported format is vaapi):
+       it will be fed hardware frames by an upstream hwupload filter, and
+       VAAPI requires hw_frames_ctx at avcodec_open2.
+
+       We key this off the codec's capability, NOT an explicit
+       pixel_format option, on purpose: setting %video.raw(pixel_format=
+       "vaapi") in liquidsoap pins the raw content type to the hardware
+       format, which back-propagates onto the SOFTWARE filter input buffer
+       (the buffer source then fails config with "Setting
+       BufferSourceContext.pix_fmt to a HW format"). Detecting the codec
+       instead lets the encoder's liquidsoap content type stay generic. */
+    const enum AVPixelFormat *pix_fmts = NULL;
+#if LIBAVCODEC_VERSION_INT <= AV_VERSION_INT(61, 13, 100)
+    pix_fmts = enc_ctx->codec->pix_fmts;
+#else
+    avcodec_get_supported_config(enc_ctx, enc_ctx->codec,
+                                 AV_CODEC_CONFIG_PIX_FORMAT, 0,
+                                 (const void **)&pix_fmts, NULL);
+#endif
+    if (pix_fmts && pix_fmts[0] != -1) {
+      int all_hw = 1, i;
+      for (i = 0; pix_fmts[i] != -1; i++) {
+        const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(pix_fmts[i]);
+        if (!d || !(d->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+          all_hw = 0;
+          break;
+        }
+      }
+      if (all_hw) {
         stream->deferred_options = *options;
         *options = NULL;
         return;
@@ -2368,7 +2382,12 @@ static void write_video_frame(av_t *av, unsigned int stream_index,
            "context; the filter graph must upload frames (hwupload) first");
 
     caml_release_runtime_system();
+    /* Inherit the hardware frames context and pixel format from the frame
+       the hwupload filter produced. The encoder was created with no
+       pixel_format (see init_stream_encoder) so its pix_fmt is unset;
+       VAAPI's init requires it to be the hardware format. */
     enc_ctx->hw_frames_ctx = av_buffer_ref(frame->hw_frames_ctx);
+    enc_ctx->pix_fmt = (enum AVPixelFormat)frame->format;
     ret = enc_ctx->hw_frames_ctx
               ? avcodec_open2(enc_ctx, enc_ctx->codec, &stream->deferred_options)
               : AVERROR(ENOMEM);
