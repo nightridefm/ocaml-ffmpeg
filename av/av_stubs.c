@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 
 #define CAML_NAME_SPACE 1
@@ -46,6 +47,14 @@ value ocaml_av_init(value unit) {
 typedef struct {
   int index;
   AVCodecContext *codec_context;
+  /* When non-NULL, opening this encoder was deferred: it is a
+     hardware-pixel-format encoder (e.g. hevc_vaapi) that was created with
+     no hw_frames_ctx, because the frames come from an upstream hwupload
+     filter. VAAPI et al. require hw_frames_ctx at avcodec_open2 time, so
+     these options are stashed here and the encoder is opened on the first
+     frame - which carries the hw_frames_ctx to inherit. See
+     init_stream_encoder / write_video_frame. */
+  AVDictionary *deferred_options;
 } stream_t;
 
 typedef struct av_t {
@@ -102,6 +111,9 @@ static void free_stream(stream_t *stream) {
 
   if (stream->codec_context)
     avcodec_free_context(&stream->codec_context);
+
+  if (stream->deferred_options)
+    av_dict_free(&stream->deferred_options);
 
   av_free(stream);
 }
@@ -1818,6 +1830,40 @@ static void init_stream_encoder(AVBufferRef *device_ctx, AVBufferRef *frame_ctx,
     }
   }
 
+  /* Defer the open for a hardware-pixel-format encoder that was given
+     neither a device nor a frames context (i.e. hwaccel="none" feeding a
+     hardware codec such as hevc_vaapi from an upstream hwupload filter).
+     VAAPI requires hw_frames_ctx at avcodec_open2, and the only place it
+     exists is on the frames the filter produces. Transfer ownership of
+     the options dict to the stream and open on the first frame
+     (write_video_frame), inheriting its hw_frames_ctx. This is the glue
+     ffmpeg.c does internally (copying the buffersink's hw_frames_ctx onto
+     the encoder before opening it); ocaml-ffmpeg has no equivalent. We
+     null *options so the caller's unused-key scan and av_dict_free
+     no-op - the dict is now the stream's to free. */
+  if (!frame_ctx && !device_ctx) {
+    /* enc_ctx->pix_fmt isn't set yet (pixel_format is applied from the
+       options dict at avcodec_open2), so read it from the dict. liquidsoap
+       stores it as the numeric AVPixelFormat (Pixel_format.get_id), so
+       parse an integer first and fall back to a format name. */
+    AVDictionaryEntry *pf = av_dict_get(*options, "pixel_format", NULL, 0);
+    enum AVPixelFormat pix_fmt = AV_PIX_FMT_NONE;
+    if (pf) {
+      char *end = NULL;
+      long n = strtol(pf->value, &end, 10);
+      pix_fmt = (end && *end == '\0') ? (enum AVPixelFormat)n
+                                      : av_get_pix_fmt(pf->value);
+    }
+    if (pix_fmt != AV_PIX_FMT_NONE) {
+      const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
+      if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+        stream->deferred_options = *options;
+        *options = NULL;
+        return;
+      }
+    }
+  }
+
   caml_release_runtime_system();
   ret = avcodec_open2(enc_ctx, enc_ctx->codec, options);
   caml_acquire_runtime_system();
@@ -2169,7 +2215,14 @@ static void write_frame(av_t *av, int stream_index, AVCodecContext *enc_ctx,
   packet->data = NULL;
   packet->size = 0;
 
-  if (enc_ctx->hw_frames_ctx && frame) {
+  /* Upload software frames to a hardware surface only when the frame is
+     NOT already on one. Frames arriving from an upstream hwupload filter
+     already carry hw_frames_ctx (they're GPU surfaces) and must be sent
+     to the encoder as-is - running av_hwframe_transfer_data on them would
+     be wrong (it expects a software source) and is what the manual
+     encoder-side upload path does. Software frames (the non-filter
+     hwaccel="frame" path) still take the upload branch below. */
+  if (enc_ctx->hw_frames_ctx && frame && !frame->hw_frames_ctx) {
     hw_frame = av_frame_alloc();
 
     if (!hw_frame) {
@@ -2290,6 +2343,46 @@ static void write_video_frame(av_t *av, unsigned int stream_index,
 
   if (!stream->codec_context)
     Fail("Failed to write video frame with no encoder");
+
+  /* Deferred hardware encoder open (see init_stream_encoder): the encoder
+     was created without a frames context, so inherit it from the first
+     frame - produced by an upstream hwupload filter, so it carries the
+     graph's hw_frames_ctx - then open with the stashed options and copy
+     the resulting parameters onto the muxer stream (the steps
+     init_stream_encoder normally runs right after avcodec_open2). */
+  if (stream->deferred_options) {
+    AVCodecContext *enc_ctx = stream->codec_context;
+    AVStream *avstream = av->format_context->streams[stream->index];
+    int ret;
+
+    /* A flush (NULL frame) before any real frame: the encoder was never
+       opened, so there is nothing to flush. */
+    if (!frame) {
+      av_dict_free(&stream->deferred_options);
+      stream->deferred_options = NULL;
+      return;
+    }
+
+    if (!frame->hw_frames_ctx)
+      Fail("Hardware encoder received a software frame with no frames "
+           "context; the filter graph must upload frames (hwupload) first");
+
+    caml_release_runtime_system();
+    enc_ctx->hw_frames_ctx = av_buffer_ref(frame->hw_frames_ctx);
+    ret = enc_ctx->hw_frames_ctx
+              ? avcodec_open2(enc_ctx, enc_ctx->codec, &stream->deferred_options)
+              : AVERROR(ENOMEM);
+    av_dict_free(&stream->deferred_options);
+    stream->deferred_options = NULL;
+    if (ret >= 0) {
+      avstream->time_base = enc_ctx->time_base;
+      ret = avcodec_parameters_from_context(avstream->codecpar, enc_ctx);
+    }
+    caml_acquire_runtime_system();
+
+    if (ret < 0)
+      ocaml_avutil_raise_error(ret);
+  }
 
   write_frame(av, stream_index, stream->codec_context, _on_keyframe, frame);
 }
