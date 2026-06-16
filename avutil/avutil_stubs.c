@@ -1300,7 +1300,9 @@ static value value_of_pict(AVSubtitleRect *rect) {
     intnat dims[1];
     size_t buf_size = rect->type == SUBTITLE_BITMAP && i == 1
                           ? AVPALETTE_SIZE
-                          : rect->h * rect->linesize[i];
+                          : (rect->h > 0 && rect->linesize[i] > 0
+                                 ? (size_t)rect->h * (size_t)rect->linesize[i]
+                                 : 0);
     if (rect->data[i] && buf_size > 0) {
       dims[0] = buf_size;
     } else {
@@ -1453,7 +1455,7 @@ CAMLprim value ocaml_avutil_subtitle_create_frame(value _content) {
         for (int p = 0; p < 4; p++) {
           value ba = Field(data_arr, p);
           int linesize = Int_val(Field(linesize_arr, p));
-          int size = caml_ba_byte_size(Caml_ba_array_val(ba));
+          size_t size = caml_ba_byte_size(Caml_ba_array_val(ba));
 
           if (size > 0) {
             rect->data[p] = av_malloc(size);
@@ -1847,9 +1849,9 @@ CAMLprim value ocaml_avutil_av_opt_iter(value _cursor, value _class) {
 
     _tmp = caml_alloc_tuple(1);
 
-    if (option->min <= INT64_MIN)
+    if (option->min <= (double)INT64_MIN)
       Store_field(_tmp, 0, caml_copy_int64(INT64_MIN));
-    else if (option->min >= INT64_MAX)
+    else if (option->min >= (double)INT64_MAX)
       Store_field(_tmp, 0, caml_copy_int64(INT64_MAX));
     else
       Store_field(_tmp, 0, caml_copy_int64((int64_t)option->min));
@@ -1858,9 +1860,9 @@ CAMLprim value ocaml_avutil_av_opt_iter(value _cursor, value _class) {
 
     _tmp = caml_alloc_tuple(1);
 
-    if (option->max <= INT64_MIN)
+    if (option->max <= (double)INT64_MIN)
       Store_field(_tmp, 0, caml_copy_int64(INT64_MIN));
-    else if (option->max >= INT64_MAX)
+    else if (option->max >= (double)INT64_MAX)
       Store_field(_tmp, 0, caml_copy_int64(INT64_MAX));
     else
       Store_field(_tmp, 0, caml_copy_int64((int64_t)option->max));

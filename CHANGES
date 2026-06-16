@@ -27,7 +27,7 @@
 1.2.7 (2025-10-31)
 ======
 * Add ffmpeg 8.0 support
-* Fix CAMLparam definitions in C stubs (avoids potential heap 
+* Fix CAMLparam definitions in C stubs (avoids potential heap
 corruption)
 
 1.2.6 (2025-08-26)
@@ -85,7 +85,7 @@ corruption)
 * Added support for AV_CODEC_ID_WRAPPED_AVFRAME
   as valid audio/video codec.
 * Added AV_CODEC_ID_NONE to all codec id classes
-  to prevent unecessary failures when passing it
+  to prevent unnecessary failures when passing it
   as detected coded_id.
 
 1.1.8 (2023-07-01)

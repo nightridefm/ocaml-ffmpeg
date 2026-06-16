@@ -46,13 +46,26 @@ end
 
 (** {5 Input} *)
 
+type 'media stream_config = {
+  codec : ('media, Avcodec.decode) Avcodec.codec option;
+  opts : opts option;
+}
+
 (** [Av.open_input url] open the input [url] (a file name or http URL). After
     returning, if [opts] was passed, unused options are left in the hash table.
-    Raise Error if the opening failed. *)
+    The optional [configure_audio_stream], [configure_video_stream] and
+    [configure_subtitle_stream] callbacks are called once per stream of their
+    respective type after the container is opened. The returned [codec], if any,
+    is used as the decoder for that stream; [opts] are passed as per-stream
+    options to [avformat_find_stream_info]. Raise Error if the opening failed.
+*)
 val open_input :
   ?interrupt:(unit -> bool) ->
   ?format:(input, _) format ->
   ?opts:opts ->
+  ?configure_audio_stream:(audio Avcodec.params -> audio stream_config) ->
+  ?configure_video_stream:(video Avcodec.params -> video stream_config) ->
+  ?configure_subtitle_stream:(subtitle Avcodec.params -> subtitle stream_config) ->
   string ->
   input container
 
@@ -75,7 +88,7 @@ val open_input_stream :
 val get_input_duration :
   ?format:Time_format.t -> input container -> Int64.t option
 
-(** Return the input tag (key, vlue) list. *)
+(** Return the input tag (key, value) list. *)
 val get_input_metadata : input container -> (string * string) list
 
 (** Return the input format of the container. *)
@@ -163,14 +176,11 @@ val get_frame_size : (output, audio, _) stream -> int
 val get_pixel_aspect : (_, video, _) stream -> Avutil.rational option
 
 (** Same as {!Av.get_input_duration} for the input streams. *)
-val get_duration : ?format:Time_format.t -> (input, _, _) stream -> Int64.t option
+val get_duration :
+  ?format:Time_format.t -> (input, _, _) stream -> Int64.t option
 
 (** Same as {!Av.get_input_metadata} for the input streams. *)
 val get_metadata : (input, _, _) stream -> (string * string) list
-
-(** For the use of a specific decoder for the given input stream. *)
-val set_decoder :
-  (input, 'a, _) stream -> ('a, Avcodec.decode) Avcodec.codec -> unit
 
 type packet_result =
   [ `Audio_packet of int * audio Avcodec.Packet.t
@@ -214,7 +224,7 @@ type seek_flag =
 (** [Av.seek ?flags ?stream ?min_ts ?max_ts ~fmt ~ts container] seek in the
     container [container] to position [ts]. You can pass an optional [stream] to
     use for seeking, [max_ts] and [min_ts] to force seeking to happen within a
-    given timestamp window and [flags] to speficy certain property of the
+    given timestamp window and [flags] to specify certain property of the
     seeking operation. Raise Error if the seeking failed. *)
 val seek :
   ?flags:seek_flag list ->
@@ -336,7 +346,7 @@ val new_audio_stream :
     [time_base].
 
     [hardware_context] can be used to pass optional hardware device and frame
-    context to enable hardward encoding on this stream.
+    context to enable hardware encoding on this stream.
 
     Raise Error if the opening failed. *)
 val new_video_stream :

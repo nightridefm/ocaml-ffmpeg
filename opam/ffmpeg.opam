@@ -3,13 +3,13 @@ opam-version: "2.0"
 version: "1.4.0"
 synopsis: "Bindings for the ffmpeg libraries"
 maintainer: ["Romain Beauxis <toots@rastageeks.org>"]
-authors: ["The Savonet Team <savonet-users@lists.sourceforge.net>"]
+authors: ["The Savonet Team <contact@liquidsoap.info>"]
 license: "LGPL-2.1-only"
 homepage: "https://github.com/savonet/ocaml-ffmpeg"
 bug-reports: "https://github.com/savonet/ocaml-ffmpeg/issues"
 depends: [
   "ocaml" {>= "4.12"}
-  "dune" {>= "3.8"}
+  "dune" {>= "3.23"}
   "ffmpeg-av" {= version}
   "ffmpeg-avutil" {= version}
   "ffmpeg-avcodec" {= version}
@@ -20,7 +20,6 @@ depends: [
   "odoc" {with-doc}
 ]
 build: [
-  ["dune" "subst"] {dev}
   [
     "dune"
     "build"
