@@ -2344,6 +2344,18 @@ CAMLprim value ocaml_av_write_stream_packet(value _stream, value _time_base,
 
 static void write_frame(av_t *av, int stream_index, AVCodecContext *enc_ctx,
                         value _on_keyframe, AVFrame *frame) {
+  /* _on_keyframe is held across the caml_release_runtime_system() below and
+     only called (Field/caml_callback) much later, after the encode + write
+     loop. While the runtime is released another thread can run a GC that
+     moves the closure; the caller's CAMLparam only protects ITS copy, not
+     this separate by-value parameter, so without a local root of our own this
+     copy goes stale and caml_callback jumps through a dangling pointer
+     (SIGSEGV under load - e.g. an encoder filter flush at a source switch).
+     Registering it in our local roots makes the GC fix up this copy too.
+     (Val_none is an immediate; the GC leaves it untouched.) The error paths
+     below raise via caml_local_roots-restoring traps, so no manual cleanup is
+     needed. */
+  CAMLparam1(_on_keyframe);
   AVStream *avstream = av->format_context->streams[stream_index];
   AVFrame *hw_frame = NULL;
   int ret;
@@ -2421,7 +2433,7 @@ static void write_frame(av_t *av, int stream_index, AVCodecContext *enc_ctx,
   if (!frame && ret == AVERROR_EOF) {
     av_packet_free(&packet);
     caml_acquire_runtime_system();
-    return;
+    CAMLreturn0;
   }
 
   if (frame && ret == AVERROR_EOF) {
@@ -2468,10 +2480,12 @@ static void write_frame(av_t *av, int stream_index, AVCodecContext *enc_ctx,
   caml_acquire_runtime_system();
 
   if (!frame && ret == AVERROR_EOF)
-    return;
+    CAMLreturn0;
 
   if (ret < 0 && ret != AVERROR(EAGAIN))
     ocaml_avutil_raise_error(ret);
+
+  CAMLreturn0;
 }
 
 static void write_audio_frame(av_t *av, unsigned int stream_index,
@@ -2489,6 +2503,11 @@ static void write_audio_frame(av_t *av, unsigned int stream_index,
 
 static void write_video_frame(av_t *av, unsigned int stream_index,
                               value _on_keyframe, AVFrame *frame) {
+  /* Same rooting requirement as write_frame: the deferred-HW-open path below
+     releases the runtime while _on_keyframe is still live (used only when we
+     forward to write_frame), so root our copy across that window. */
+  CAMLparam1(_on_keyframe);
+
   if (av->format_context->nb_streams < stream_index)
     Fail("Stream index not found!");
 
@@ -2516,7 +2535,7 @@ static void write_video_frame(av_t *av, unsigned int stream_index,
     if (!frame) {
       av_dict_free(&stream->deferred_options);
       stream->deferred_options = NULL;
-      return;
+      CAMLreturn0;
     }
 
     if (!frame->hw_frames_ctx)
@@ -2546,6 +2565,8 @@ static void write_video_frame(av_t *av, unsigned int stream_index,
   }
 
   write_frame(av, stream_index, stream->codec_context, _on_keyframe, frame);
+
+  CAMLreturn0;
 }
 
 static void write_subtitle_frame(av_t *av, unsigned int stream_index,
