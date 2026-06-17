@@ -231,10 +231,13 @@ CAMLprim value ocaml_avdevice_set_control_message_callback(
     value _control_message_callback, value _av) {
   CAMLparam2(_control_message_callback, _av);
 
-  caml_release_runtime_system();
+  /* Must run with the runtime HELD: this registers a generational global root
+     and reads OCaml heap values (Av_val(*p_av), the callback). Doing that with
+     the runtime released races a GC on another thread (root-set corruption /
+     stale read). The call only stores a root + a C function pointer - it does
+     no blocking I/O - so there is nothing to release the runtime for. */
   ocaml_av_set_control_message_callback(&_av, c_control_message_callback,
                                         &_control_message_callback);
-  caml_acquire_runtime_system();
 
   CAMLreturn(Val_unit);
 }
