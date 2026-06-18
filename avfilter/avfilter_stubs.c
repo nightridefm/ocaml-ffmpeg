@@ -156,7 +156,21 @@ CAMLprim value ocaml_avfilter_init(value unit) {
   if (!graph)
     caml_raise_out_of_memory();
 
-  ret = caml_alloc_custom(&filter_graph_ops, sizeof(AVFilterGraph *), 1, 0);
+  /* An AVFilterGraph handle is an 8-byte pointer, but once filters are
+     attached and the graph configured it pins hundreds of KB of native
+     state (the buffersrc ring plus any auto-inserted scale/format
+     converter). Liquidsoap's encoder Fps converter rebuilds a graph on
+     every clip rotation (it keys on the per-file source time_base) and
+     drops the old one for the GC to finalize. Accounting each handle as
+     ~nothing (the old `1, 0`) let the tiny OCaml major heap go a long time
+     between collections, so those finalizers fired late and the
+     freed-but-unfinalized native graphs ratcheted RSS up ~430 KB/clip.
+     Charge a representative native cost so finalization stays current -
+     same idiom as the AVPacket handles in avcodec_stubs.c. The graph is
+     still empty here (filters attach later), so this is an estimate, not a
+     measurement; it only needs to be big enough to create GC pressure. */
+  ret = caml_alloc_custom_mem(&filter_graph_ops, sizeof(AVFilterGraph *),
+                              400000);
 
   Filter_graph_val(ret) = graph;
 
