@@ -483,4 +483,21 @@ let write_subtitle_frame stream frame = write_frame stream frame
 
 external flush : output container -> unit = "ocaml_av_flush"
 external tell : _ container -> int option = "ocaml_av_tell"
-external close : _ container -> unit = "ocaml_av_close"
+external ocaml_av_close : _ container -> unit = "ocaml_av_close"
+
+(* ocaml_av_close flushes the encoders and writes the muxer trailer to the sink
+   BEFORE freeing the native context (close_av). On a dead sink - a dropped RTMP
+   socket, a full disk - that write raises, so the stub never reaches close_av
+   and the encoder, the format context and the socket are all stranded until the
+   GC finalizes the handle. Callers cannot clean up either: the exception is all
+   they get, and the handle carries no other way to free it.
+
+   Force the idempotent native free on the error path. ocaml_av_cleanup_av goes
+   straight to close_av and writes nothing to the sink, so it cannot raise for
+   the same reason, and it is what the input path already registers as its
+   finalizer. The original exception is re-raised untouched. *)
+let close c =
+  try ocaml_av_close c
+  with e ->
+    (try ocaml_av_cleanup_av c with _ -> ());
+    raise e
