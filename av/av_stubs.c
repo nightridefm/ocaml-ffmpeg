@@ -46,6 +46,10 @@ value ocaml_av_init(value unit) {
 typedef struct {
   int index;
   AVCodecContext *codec_context;
+  /* End-of-input draining (see ocaml_av_read_input): 0 while the demuxer is
+     still producing, 1 once this decoder has been sent its flush packet, 2
+     once it has reported AVERROR_EOF and has nothing left to give. */
+  int drain_state;
 } stream_t;
 
 typedef struct av_t {
@@ -1188,6 +1192,46 @@ static int decode_media_packet(av_t *av, stream_t *stream, AVPacket *packet) {
   return ret;
 }
 
+/* Pull one more frame out of a decoder after the demuxer has run dry.
+   avcodec's documented decode loop ends with send_packet(NULL) followed by
+   receive_frame until AVERROR_EOF; without that step every frame the decoder
+   is still holding is lost. For a codec with delay that silently drops the
+   tail of the stream, and for a single-frame image - a PNG cover, say - it
+   drops the ONLY frame, so the file looks undecodable even though libavcodec
+   handled it fine.
+
+   Returns 0 with a frame in av->frame, AVERROR_EOF when this decoder is spent,
+   or a negative error. */
+static int drain_media_decoder(av_t *av, stream_t *stream) {
+  AVCodecContext *dec = stream->codec_context;
+  int ret;
+
+  if (stream->drain_state == 2)
+    return AVERROR_EOF;
+
+  caml_release_runtime_system();
+
+  if (stream->drain_state == 0) {
+    /* Errors here are not fatal: a decoder that refuses the flush packet has
+       nothing buffered to give us, and receive_frame below reports that. */
+    avcodec_send_packet(dec, NULL);
+    stream->drain_state = 1;
+  }
+
+  ret = avcodec_receive_frame(dec, av->frame);
+
+  caml_acquire_runtime_system();
+
+  if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN)) {
+    /* EAGAIN after a flush means the decoder has nothing more; treat it the
+       same as EOF so we move on to the next selected stream. */
+    stream->drain_state = 2;
+    return AVERROR_EOF;
+  }
+
+  return ret;
+}
+
 static int decode_subtitle_packet(av_t *av, stream_t *stream,
                                   AVPacket *packet) {
   AVCodecContext *dec = stream->codec_context;
@@ -1288,6 +1332,69 @@ CAMLprim value ocaml_av_read_input(value _unhandled_packet, value _packet,
 
       if (ret == AVERROR(EAGAIN))
         continue;
+
+      /* The demuxer is out of packets, but the decoders may not be out of
+         frames: anything with reorder delay (H.264 with B-frames, say) is
+         still holding some, and an intra-only single-frame image may be
+         holding the only one it will ever produce. Drain them before
+         reporting end of input - this is the send_packet(NULL) half of
+         avcodec's documented decode loop, which was missing entirely.
+
+         One frame per call, same as the normal path: the caller keeps
+         calling read_input until it gets EOF, and each selected stream is
+         walked until its decoder reports EOF (drain_state 2), so the loop
+         terminates. */
+      if (ret == AVERROR_EOF) {
+        stream_t **input_streams = allocate_input_context(av);
+
+        for (i = 0; i < Wosize_val(_frame); i++) {
+          int drain_idx = Int_val(Field(_frame, i));
+          stream_t *drain_stream;
+
+          if (drain_idx < 0 || (unsigned int)drain_idx >= av->nb_allocated_streams)
+            continue;
+
+          drain_stream = input_streams[drain_idx];
+
+          /* No decoder was ever opened for this stream, so it holds nothing. */
+          if (!drain_stream || !drain_stream->codec_context)
+            continue;
+
+          /* Subtitles decode synchronously (avcodec_decode_subtitle2) and
+             buffer nothing, so there is nothing to flush. */
+          if (drain_stream->codec_context->codec_type == AVMEDIA_TYPE_SUBTITLE)
+            continue;
+
+          ret = drain_media_decoder(av, drain_stream);
+
+          if (ret == AVERROR_EOF)
+            continue;
+
+          if (ret < 0)
+            ocaml_avutil_raise_error(ret);
+
+          frame = av_frame_clone(av->frame);
+          av_frame_unref(av->frame);
+
+          if (!frame)
+            caml_raise_out_of_memory();
+
+          if (drain_stream->codec_context->codec_type == AVMEDIA_TYPE_AUDIO)
+            kind = PVV_Audio_frame;
+          else
+            kind = PVV_Video_frame;
+
+          value_of_frame(&frame_value, frame);
+
+          STORE_DECODED_CONTENT(ans, decoded_content,
+                                Val_int(drain_stream->index), kind,
+                                frame_value);
+          CAMLreturn(ans);
+        }
+
+        /* Every selected decoder is spent. */
+        ocaml_avutil_raise_error(AVERROR_EOF);
+      }
 
       if (ret < 0)
         ocaml_avutil_raise_error(ret);
@@ -1456,8 +1563,13 @@ CAMLprim value ocaml_av_seek_native(value _flags, value _stream, value _min_ts,
      handed to the caller as if they came from the new position. */
   if (av->streams) {
     for (i = 0; i < av->nb_allocated_streams; i++)
-      if (av->streams[i] && av->streams[i]->codec_context)
+      if (av->streams[i] && av->streams[i]->codec_context) {
         avcodec_flush_buffers(av->streams[i]->codec_context);
+        /* The decoder is live again, so a previous end-of-input drain must
+           not keep it marked spent - otherwise decoding to EOF, seeking back
+           and decoding again would skip the drain the second time. */
+        av->streams[i]->drain_state = 0;
+      }
   }
   av->pending_stream_idx = -1;
 
