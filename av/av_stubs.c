@@ -1706,8 +1706,13 @@ CAMLprim value ocaml_av_open_output(value _interrupt, value _format,
 
   unused = ocaml_avutil_unused_options(&options);
 
-  // allocate format context
-  ans = caml_alloc_custom(&av_ops, sizeof(av_t *), 0, 1);
+  // allocate format context.
+  // Account the output container's native footprint (encoder + muxer +
+  // buffers, several MB) so the GC finalizes an abandoned handle promptly.
+  // Declaring used=0 left a handle that was never closed - or whose close
+  // raised before reaching close_av - stranded for as long as the tiny OCaml
+  // major heap took to come round, which on a long-lived radio is forever.
+  ans = caml_alloc_custom_mem(&av_ops, sizeof(av_t *), 4 * 1024 * 1024);
   Av_base_val(ans) = av;
 
   ret = caml_alloc_tuple(2);
@@ -1733,8 +1738,13 @@ CAMLprim value ocaml_av_open_output_format(value _format, value _interleaved,
 
   unused = ocaml_avutil_unused_options(&options);
 
-  // allocate format context
-  ans = caml_alloc_custom(&av_ops, sizeof(av_t *), 0, 1);
+  // allocate format context.
+  // Account the output container's native footprint (encoder + muxer +
+  // buffers, several MB) so the GC finalizes an abandoned handle promptly.
+  // Declaring used=0 left a handle that was never closed - or whose close
+  // raised before reaching close_av - stranded for as long as the tiny OCaml
+  // major heap took to come round, which on a long-lived radio is forever.
+  ans = caml_alloc_custom_mem(&av_ops, sizeof(av_t *), 4 * 1024 * 1024);
   Av_base_val(ans) = av;
 
   ret = caml_alloc_tuple(2);
@@ -1763,8 +1773,13 @@ CAMLprim value ocaml_av_open_output_stream(value _format, value _avio,
 
   unused = ocaml_avutil_unused_options(&options);
 
-  // allocate format context
-  ans = caml_alloc_custom(&av_ops, sizeof(av_t *), 0, 1);
+  // allocate format context.
+  // Account the output container's native footprint (encoder + muxer +
+  // buffers, several MB) so the GC finalizes an abandoned handle promptly.
+  // Declaring used=0 left a handle that was never closed - or whose close
+  // raised before reaching close_av - stranded for as long as the tiny OCaml
+  // major heap took to come round, which on a long-lived radio is forever.
+  ans = caml_alloc_custom_mem(&av_ops, sizeof(av_t *), 4 * 1024 * 1024);
   Av_base_val(ans) = av;
 
   ret = caml_alloc_tuple(2);
